@@ -1,0 +1,28 @@
+#include    <Arduino.h>
+#include <IRremoteESP8266.h>
+#include <IRsend.h>
+
+const int SEND_PIN = 4;  // Pin for IR LED
+IRsend irsend(SEND_PIN);
+bool a = false;
+// Define the NEC protocol values for the specific IR code you want to send
+
+void setup() {
+  Serial.begin(115200);
+  irsend.begin();
+
+}
+
+void loop() {
+  // Send the IR code
+ irsend.sendSAMSUNG(0xE0E040BF,32);
+  //  irsend.sendNEC(0x800080, 24);
+  //   if(a)
+  //  irsend.sendNEC(0x154a02e5, 25);
+  
+  String msg = "";
+  msg = a?"TWO":"one";
+  Serial.println(msg);
+  a = !a;
+  delay(5000); // Wait for 5 seconds before sending the next IR code
+}

@@ -1,0 +1,351 @@
+
+#include <../lib/Time-master/TimeLib.h>
+#include <../lib/pubsubclient-2.8/src/PubSubClient.h>
+#include <../include/Creds/WifiCred.h>
+#include <../include/Creds/HiveMQCred.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <ArduinoOTA.h>
+#include <ESP8266WebServer.h>
+#include <ESP8266HTTPClient.h>
+
+#define DEVICE_NAME "Adler"
+bool a = false;
+
+// DS8
+#define ONE_WIRE_BUS 0
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature tempSensor(&oneWire);
+DeviceAddress sensorAddress;
+
+#define serverPort 80 // Web server port (default is 80)
+#define IR_SEND_PIN 13
+#define DISABLE_CODE_FOR_RECEIVER
+#include <IRremote.hpp>
+ESP8266WebServer server(serverPort);
+uint oldTime = 0;
+double _current_temp = 0;
+void sendIR(uint32_t);
+// TCP Definitions
+WiFiClientSecure hive_client;
+PubSubClient HiveMQ(hive_client);
+#define DEBUG // comment for power efficiency
+
+#pragma region OTA
+void startOTA()
+{
+#ifdef DEBUG
+  String type;
+  // caso a atualização esteja sendo gravada na memória flash externa, então informa "flash"
+  if (ArduinoOTA.getCommand() == U_FLASH)
+    type = "flash";
+  else                   // caso a atualização seja feita pela memória interna (file system), então informa "filesystem"
+    type = "filesystem"; // U_SPIFFS
+  // exibe mensagem junto ao tipo de gravação
+  Serial.println("Start updating " + type);
+#endif
+}
+// exibe mensagem
+void endOTA()
+{
+#ifdef DEBUG
+  Serial.println("\nEnd");
+#endif
+}
+// exibe progresso em porcentagem
+void progressOTA(unsigned int progress, unsigned int total)
+{
+#ifdef DEBUG
+  Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+#endif
+}
+
+void errorOTA(ota_error_t error)
+{
+#ifdef DEBUG
+  Serial.printf("Error[%u]: ", error);
+  if (error == OTA_AUTH_ERROR)
+    Serial.println("Auth Failed");
+  else if (error == OTA_BEGIN_ERROR)
+    Serial.println("Begin Failed");
+  else if (error == OTA_CONNECT_ERROR)
+    Serial.println("Connect Failed");
+  else if (error == OTA_RECEIVE_ERROR)
+    Serial.println("Receive Failed");
+  else if (error == OTA_END_ERROR)
+    Serial.println("End Failed");
+#endif
+}
+#pragma endregion
+
+struct Internals
+{
+  bool time_synced = false;
+  uint boot_time = 0;
+
+  String toString()
+  {
+    String result = "time_synced: " + String(time_synced) + ";boot_time: " + String(boot_time) + ";life: " + String(now() - boot_time);
+    return result;
+  }
+};
+
+struct Timers_Last_Values
+{
+  uint temperature = 0;
+  uint sync_time = 0;
+};
+Timers_Last_Values Timers;
+
+Internals control_variables;
+
+#pragma region Server
+void handleIRSend()
+{
+  Serial.printf("%d\n", server.args());
+  sendIR(0x10001);
+}
+void handleRoot()
+{
+  String message = 
+  //##$$page.html
+  //##$$
+  ;  
+  server.send(200, "text/html", message);
+}
+
+void handleJS()
+{
+  String message =
+      //##$$page.js
+      //##$$
+      ;
+  server.send(200, "text/html", message);
+}
+
+void handleCSS()
+{
+  String message =
+      //##$$page.css
+      //##$$
+      ;
+  server.send(200, "text/html", message);
+}
+
+String getDefineName(int value)
+{
+  switch (value)
+  {
+  case -4:
+    return "MQTT_CONNECTION_TIMEOUT";
+  case -3:
+    return "MQTT_CONNECTION_LOST";
+  case -2:
+    return "MQTT_CONNECT_FAILED";
+  case -1:
+    return "MQTT_DISCONNECTED";
+  case 0:
+    return "MQTT_CONNECTED";
+  case 1:
+    return "MQTT_CONNECT_BAD_PROTOCOL";
+  case 2:
+    return "MQTT_CONNECT_BAD_CLIENT_ID";
+  case 3:
+    return "MQTT_CONNECT_UNAVAILABLE";
+  case 4:
+    return "MQTT_CONNECT_BAD_CREDENTIALS";
+  case 5:
+    return "MQTT_CONNECT_UNAUTHORIZED";
+  default:
+    return "Unknown";
+  }
+}
+
+void handleInfo()
+{
+  String response = "temp:";
+  response += String(_current_temp).substring(0, 4);
+  response += ";mqtt:";
+  response += HiveMQ.state();
+  response += ";";
+  response += control_variables.toString();
+  response += ";";
+  server.send(200, "text/plain", response);
+}
+#pragma endregion
+
+// Callback for payload at the mqtt topic
+void HiveMQ_Callback(char *topic, byte *payload, unsigned int length)
+{
+  String incommingMessage = "";
+  for (int i = 0; i < length; i++)
+    incommingMessage += (char)payload[i];
+
+  Serial.printf("MQTT::[%s]-->[%s]\n", topic, incommingMessage.c_str());
+  // Only topic Shell will have valid commands and expect a response
+  if (strcmp(topic, "Adler/Light") == 0)
+  {
+    incommingMessage == "1" ? digitalWrite(2, !HIGH) : digitalWrite(2, !LOW);
+    incommingMessage == "HIGH" ? digitalWrite(2, !HIGH) : digitalWrite(2, !LOW);
+    incommingMessage == "on" ? digitalWrite(2, !HIGH) : digitalWrite(2, !LOW);
+  }
+}
+
+bool getTime()
+{
+  bool result = false;
+  Serial.println("Syncing Time Online");
+  WiFiClient client;
+  HTTPClient http;
+  http.begin(client, "http://worldtimeapi.org/api/timezone/America/Bahia.txt"); // HTTP
+  int httpCode = http.GET();
+  // httpCode will be negative on error
+  if (httpCode > 0)
+  {
+    // HTTP header has been send and Server response header has been handled
+    // file found at server
+    if (httpCode == HTTP_CODE_OK)
+    {
+      Serial.printf("[HTTP] OK... code: %d\n", httpCode);
+      String payload = http.getString();
+      char str[payload.length() + 1];
+      strcpy(str, payload.c_str());
+      char *pch;
+      pch = strtok(str, ":\n");
+      int i = 0;
+      int raw_offset = 0;
+      while (pch != NULL)
+      {
+        i++;
+        if (i == 23)
+        {
+          raw_offset = atoi(pch);
+        }
+        if (i == 27)
+        {
+          setTime(atoi(pch) + raw_offset);
+        }
+        // printf("%d: %s\n", i, pch);
+        pch = strtok(NULL, ":\n");
+      }
+      String msg = "Time Synced ";
+      msg += millis();
+      msg += "ms from boot.";
+      result = true;
+    }
+    else
+    {
+      Serial.printf("[HTTP] Error code: %d\n", httpCode);
+    }
+  }
+  else
+  {
+    Serial.printf("[HTTP] GET... failed, error: %s\n", http.errorToString(httpCode).c_str());
+  }
+  http.end();
+  return result;
+}
+
+void sendIR(uint32_t Code)
+{
+  Serial.printf("Sending {0x%X}\n", Code);
+  IrSender.sendPulseDistanceWidth(38, 9000, 4550, 600, 1700, 600, 550, Code, 24, PROTOCOL_IS_LSB_FIRST, 100, 0);
+}
+
+void setup()
+{
+  pinMode(ONE_WIRE_BUS, INPUT);
+  pinMode(2, OUTPUT);
+
+  // tempSensor.begin();
+  // tempSensor.getAddress(sensorAddress, 0);
+  // tempSensor.setResolution(sensorAddress, 11);
+  Serial.begin(115200);
+  IrSender.begin(false);
+  int sensors_found = tempSensor.getDeviceCount();
+  Serial.printf("DS18 SENSORS: %d\n", sensors_found);
+  for (size_t i = 0; i < sensors_found; i++)
+  {
+    Serial.printf("[%d] 0x", i);
+    DeviceAddress addr;
+    tempSensor.getAddress(addr, i);
+    for (size_t j = 0; j < 8; j++)
+    {
+      if (addr[j] < 0x10)
+        Serial.print("0");
+      Serial.print(addr[j], HEX);
+    }
+    Serial.println("");
+  }
+  Serial.printf("\n");
+  Serial.print("Getting Internet Acess");
+
+  // Wifi Setup
+  WiFi.mode(WIFI_STA); // Important to be explicitly connected as client
+
+#ifdef DEVICE_NAME
+  WiFi.hostname(DEVICE_NAME);
+#endif
+
+  WiFi.begin(WIFISSID, WIFIPASSWD);
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    delay(100);
+    Serial.print(".");
+  }
+
+  Serial.println();
+  Serial.print("Connection took (ms) : ");
+  Serial.println(millis());
+  Serial.println("WiFi connected");
+  Serial.println("IP address: ");
+  Serial.println(WiFi.localIP());
+  server.on("/", handleRoot);
+  server.on("/page.js", handleJS);
+  server.on("/page.css", handleCSS);
+  server.on("/send-ir", handleIRSend); // Handle IR code transmission
+  server.on("/info", handleInfo);      // Handle IR code transmission
+  server.begin();
+  Serial.println("HTTP server started");
+
+  // OTA
+  ArduinoOTA.setHostname(DEVICE_NAME);
+  ArduinoOTA.setPort(8266);
+  ArduinoOTA.onStart(startOTA);
+  ArduinoOTA.onEnd(endOTA);
+  ArduinoOTA.onProgress(progressOTA);
+  ArduinoOTA.onError(errorOTA);
+  ArduinoOTA.begin(true);
+
+  hive_client.setInsecure();
+  HiveMQ.setServer(MQTT_URL, MQTT_PORT);
+  HiveMQ.setCallback(HiveMQ_Callback);
+
+  control_variables.time_synced = getTime();
+  control_variables.boot_time = now();
+
+  if (HiveMQ.connect(DEVICE_NAME, MQTT_USER, MQTT_PASSWD))
+    Serial.println("MQTT Connected");
+  else
+    Serial.printf("Can't Connect to MQTT Error Code : %d\n", HiveMQ.state());
+  HiveMQ.subscribe("Adler/#");
+}
+
+void loop()
+{
+  ArduinoOTA.handle();
+  server.handleClient();
+  HiveMQ.loop();
+
+  if (now() - Timers.temperature > 0)
+  {
+    Timers.temperature = now();
+    tempSensor.requestTemperatures();
+    _current_temp = tempSensor.getTempCByIndex(0);
+  }
+  if (now() - Timers.sync_time > 0 && !control_variables.time_synced)
+  {
+    Timers.sync_time = now();
+    control_variables.time_synced = getTime();
+  }
+}

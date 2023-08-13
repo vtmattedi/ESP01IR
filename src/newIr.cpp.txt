@@ -1,0 +1,40 @@
+/*
+ * SimpleSender.cpp
+ *
+ *  Demonstrates sending IR codes in standard format with address and command
+ *  An extended example for sending can be found as SendDemo.
+ *
+ *  Copyright (C) 2020-2022  Armin Joachimsmeyer
+ *  armin.joachimsmeyer@gmail.com
+ *
+ *  This file is part of Arduino-IRremote https://github.com/Arduino-IRremote/Arduino-IRremote.
+ *
+ *  MIT License
+ */
+#include <Arduino.h>
+#define IR_SEND_PIN 13
+#define DISABLE_CODE_FOR_RECEIVER // Disables restarting receiver after each send. Saves 450 bytes program memory and 269 bytes RAM if receiving functions are not used.
+                                  // #define SEND_PWM_BY_TIMER         // Disable carrier PWM generation in software and use (restricted) hardware PWM.
+// #define USE_NO_SEND_PWM           // Use no carrier PWM, just simulate an active low receiver signal. Overrides SEND_PWM_BY_TIMER definition
+bool a = true;
+#include <IRremote.hpp>
+
+void setup()
+{
+    pinMode(2, OUTPUT);
+
+    Serial.begin(115200);
+    IrSender.begin(false); // Start with IR_SEND_PIN as send pin and disable feedback LED at default feedback LED pin
+}
+
+
+void loop()
+{
+    digitalWrite(2, a);
+  
+    a = !a;
+   
+    IrSender.sendPulseDistanceWidth(38, 9000, 4550, 600, 1700, 600, 550, 0x10001, 24, PROTOCOL_IS_LSB_FIRST, 100, 0);
+
+    delay(1000); // delay must be greater than 5 ms (RECORD_GAP_MICROS), otherwise the receiver sees it as one long signal
+}

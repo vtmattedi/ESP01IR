@@ -1,0 +1,476 @@
+#include <IRremoteESP8266.h>
+#include <IRrecv.h>
+#include <IRsend.h>
+#include <IRutils.h>
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+#include <D:\Projects\PIO\ESP01Ir\include\Creds\WifiCred.h>
+
+const int IR_PIN = 4;      // Pin connected to the IR receiver OUT pin
+const int serverPort = 80; // Web server port (default is 80)
+const int IR_LED_PIN = 5;
+
+IRrecv irrecv(IR_PIN);
+IRsend irsend(IR_LED_PIN);
+decode_results results;
+ESP8266WebServer server(serverPort);
+
+const char *decode_type_to_string[] = {
+    "UNKNOWN",
+    "UNUSED",
+    "RC5",
+    "RC6",
+    "NEC",
+    "SONY",
+    "PANASONIC",
+    "JVC",
+    "SAMSUNG",
+    "WHYNTER",
+    "AIWA_RC_T501",
+    "LG",
+    "SANYO",
+    "MITSUBISHI",
+    "DISH",
+    "SHARP",
+    "COOLIX",
+    "DAIKIN",
+    "DENON",
+    "KELVINATOR",
+    "SHERWOOD",
+    "MITSUBISHI_AC",
+    "RCMM",
+    "SANYO_LC7461",
+    "RC5X",
+    "GREE",
+    "PRONTO",
+    "NEC_LIKE",
+    "ARGO",
+    "TROTEC",
+    "NIKAI",
+    "RAW",
+    "GLOBALCACHE",
+    "TOSHIBA_AC",
+    "FUJITSU_AC",
+    "MIDEA",
+    "MAGIQUEST",
+    "LASERTAG",
+    "CARRIER_AC",
+    "HAIER_AC",
+    "MITSUBISHI2",
+    "HITACHI_AC",
+    "HITACHI_AC1",
+    "HITACHI_AC2",
+    "GICABLE",
+    "HAIER_AC_YRW02",
+    "WHIRLPOOL_AC",
+    "SAMSUNG_AC",
+    "LUTRON",
+    "ELECTRA_AC",
+    "PANASONIC_AC",
+    "PIONEER",
+    "LG2",
+    "MWM",
+    "DAIKIN2",
+    "VESTEL_AC",
+    "TECO",
+    "SAMSUNG36",
+    "TCL112AC",
+    "LEGOPF",
+    "MITSUBISHI_HEAVY_88",
+    "MITSUBISHI_HEAVY_152",
+    "DAIKIN216",
+    "SHARP_AC",
+    "GOODWEATHER",
+    "INAX",
+    "DAIKIN160",
+    "NEOCLIMA",
+    "DAIKIN176",
+    "DAIKIN128",
+    "AMCOR",
+    "DAIKIN152",
+    "MITSUBISHI136",
+    "MITSUBISHI112",
+    "HITACHI_AC424",
+    "SONY_38K",
+    "EPSON",
+    "SYMPHONY",
+    "HITACHI_AC3",
+    "DAIKIN64",
+    "AIRWELL",
+    "DELONGHI_AC",
+    "DOSHISHA",
+    "MULTIBRACKETS",
+    "CARRIER_AC40",
+    "CARRIER_AC64",
+    "HITACHI_AC344",
+    "CORONA_AC",
+    "MIDEA24",
+    "ZEPEAL",
+    "SANYO_AC",
+    "VOLTAS",
+    "METZ",
+    "TRANSCOLD",
+    "TECHNIBEL_AC",
+    "MIRAGE",
+    "ELITESCREENS",
+    "PANASONIC_AC32",
+    "MILESTAG2",
+    "ECOCLIM",
+    "XMP",
+    "TRUMA",
+    "HAIER_AC176",
+    "TEKNOPOINT",
+    "KELON",
+    "TROTEC_3550",
+    "SANYO_AC88",
+    "BOSE",
+    "ARRIS",
+    "RHOSS",
+    "AIRTON",
+    "COOLIX48",
+    "HITACHI_AC264",
+    "KELON168",
+    "HITACHI_AC296",
+    "DAIKIN200",
+    "HAIER_AC160",
+    "CARRIER_AC128",
+    "TOTO",
+    "CLIMABUTLER",
+    "TCL96AC",
+    "BOSCH144",
+    "SANYO_AC152",
+    "DAIKIN312",
+    "GORENJE",
+    "WOWWEE",
+    "CARRIER_AC84",
+    "YORK",
+    // Add new entries before this one, and update it to point to the last entry.
+};
+
+String getDecodeTypeString(decode_type_t type)
+{
+    if (type >= UNKNOWN && type <= YORK)
+    {
+        return String(decode_type_to_string[type]);
+    }
+    else
+    {
+        return "INVALID";
+    }
+}
+struct storedCodes
+{
+    uint64_t code = 0;
+    decode_type_t decode_type = decode_type_t::UNKNOWN;
+    String alias = "";
+    uint16_t index = 0;
+    bool configured = false;
+    String toString()
+    {
+        String str = "Code: " + String(code, HEX) + "\n";
+        str += "Decode Type: " + String(decode_type) + "\n";
+        str += "Alias: " + alias + "\n";
+        str += "Index: " + String(index) + "\n";
+        return str;
+    }
+};
+
+struct CodeList
+{
+#define MAX_CODES 100
+    storedCodes codes[MAX_CODES];
+
+    bool setAlias(String alias, int index)
+    {
+        if (index < 0 || index >= MAX_CODES)
+            return false;
+
+        if (!codes[index].configured)
+            return false;
+
+        codes[index].alias = alias;
+        return true;
+    }
+
+    int add(uint64_t code, decode_type_t decode_type)
+    {
+
+        for (size_t i = 0; i < MAX_CODES; i++)
+        {
+            if (codes[i].configured)
+            {
+                if (codes[i].code == code && codes[i].decode_type == decode_type)
+                    return i;
+            }
+
+            if (!codes[i].configured)
+            {
+                codes[i].code = code;
+                codes[i].decode_type = decode_type;
+                codes[i].configured = true;
+                codes[i].index = i;
+                return i;
+            }
+        }
+        return -1;
+    }
+    int add(storedCodes newcode)
+    {
+        for (size_t i = 0; i < MAX_CODES; i++)
+        {
+            if (!codes[i].configured)
+            {
+                codes[i] = newcode;
+                codes[i].index = i;
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    void reset()
+    {
+        for (size_t i = 0; i < MAX_CODES; i++)
+        {
+            codes[i].code = 0;
+            codes[i].decode_type = decode_type_t::UNKNOWN;
+            codes[i].alias = "";
+            codes[i].configured = false;
+            codes[i].index = i;
+        }
+    }
+
+    String toString(int index)
+    {
+        if (index < 0 || index >= MAX_CODES)
+            return "false";
+        return codes[index].toString();
+    }
+    String toString()
+    {
+        String msg = "";
+
+        for (size_t i = 0; i < MAX_CODES; i++)
+        {
+            if (codes[i].configured)
+                msg += codes[i].toString();
+        }
+        return msg;
+    }
+};
+
+CodeList codelist;
+
+void handleIRSend()
+{
+    if (server.hasArg("code"))
+    {
+        unsigned long irCode = strtoul(server.arg("code").c_str(), NULL, 0);
+        irsend.sendNEC(irCode);
+        server.send(200, "text/plain", "IR Code sent: " + String(irCode, HEX));
+    }
+    else
+    {
+        server.send(400, "text/plain", "Missing 'code' parameter");
+    }
+}
+void handleRoot()
+{
+    String message = R"==(
+<!DOCTYPE html>
+<html>
+
+
+<head>
+    <title>IR Codes Display</title>
+    <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+    <style>
+        .card:hover {
+            animation-duration: 1000ms;
+            background-color: blue;
+        }
+    </style>
+    
+</head>
+
+<body>
+    <div class="container mt-5">
+        <h1 class="text-center mb-4">IR Codes Display</h1>
+        <div class="row" id="card-container">
+            <!-- Cards will be dynamically added here -->
+        </div>
+    </div>
+    <script>
+        // Function to add a new card to the card-container
+        function addCard(irCode) {
+
+            const cardContainer = document.getElementById('card-container');
+            cardContainer.innerHTML = ''; // Clear the existing cards
+            const card = document.createElement('div');
+            card.className = 'col-md-4 mb-3';
+            card.innerHTML = `
+        <div class="card">
+          <div class="card-body">
+            <h5 class="card-title">${code}</h5>
+            <p class="card-text">${type}</p>
+          </div>
+        </div>
+      `;
+            cardContainer.appendChild(card);
+        }
+
+        // Function to fetch and update the IR codes
+        function fetchIRCodes() {
+            fetch('/ir-codes').then(response => response.text())
+                .then(data => {
+                    const codesContainer = document.getElementById('codesContainer');
+                    codesContainer.textContent = data;
+
+                    // Split the fetched data by newline characters
+                    const codeLines = data.trim().split('\n');
+                    const storedCodesArray = [];
+
+                    // Create storedCodes objects from the split data
+                    for (const line of codeLines) {
+                        const codeObject = {};
+                        const keyValuePairs = line.split(':');
+                        codeObject[keyValuePairs[0].trim()] = keyValuePairs[1].trim();
+
+                        storedCodesArray.push(codeObject);
+                    }
+
+                    console.log(storedCodesArray); // Display the array of storedCodes objects
+                })
+                .catch(error => console.error('Error:', error));
+
+        }
+
+        // Fetch IR codes on page load and set an interval to update them periodically
+        document.addEventListener('DOMContentLoaded', function () {
+            fetchIRCodes();
+            setInterval(fetchIRCodes, 500); // Update the codes every 5 seconds (adjust as needed)
+        });
+    </script>
+    <h1>Send IR Code</h1>
+    <label for="code">IR Code:</label>
+    <input type="text" id="code" name="code" />
+    <button onclick="sendIRCode()">Send</button>
+
+    <script>
+        function sendIRCode() {
+            const irCode = document.getElementById('code').value;
+            fetch('/send-ir?code=' + irCode)
+                .then(response => response.text())
+                .then(data => {
+                    console.log(data);
+                    // Optionally, update UI with response data
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    // Handle error if needed
+                });
+        }
+    </script>
+</body>
+
+</html>
+    )==";
+
+    server.send(200, "text/html", message);
+}
+
+void handleIRCodes()
+{
+    String response;
+    for (size_t i = 0; i < MAX_CODES; i++)
+    {
+        if (codelist.codes[i].configured)
+        {
+            response += codelist.codes[i].toString();
+            response += "\n";
+        }
+    }
+
+    server.send(200, "text/plain", response);
+}
+
+void setup()
+{
+    codelist.reset();
+    Serial.begin(115200);
+    irrecv.enableIRIn(); // Start the IR receiver
+    irsend.begin();
+    // WiFi.begin(WIFISSID, WIFIPASSWD); // Replace with your Wi-Fi credentials
+    // while (WiFi.status() != WL_CONNECTED)
+    // {
+    //     delay(1000);
+    //     Serial.print(".");
+    // }
+    Serial.println();
+    Serial.println("Wi-Fi connected!");
+    Serial.print("IP address: ");
+    Serial.println(WiFi.localIP());
+
+    // server.on("/", handleRoot);
+    // server.on("/send-ir", handleIRSend);   // Handle IR code transmission
+    // server.on("/ir-codes", handleIRCodes); // Handle IR code transmission
+
+    // server.begin();
+    Serial.println("HTTP server started");
+}
+
+void loop()
+{
+    if (irrecv.decode(&results))
+    {
+        Serial.println("Received IR code!");
+        Serial.print("Value: 0x");
+        Serial.println(results.value, HEX);
+        Serial.print("Bits: ");
+        Serial.println(results.bits);
+        Serial.print("Protocol: ");
+        Serial.println(results.decode_type);
+        Serial.print("Address: 0x");
+        Serial.println(results.address, HEX);
+        Serial.print("Command: 0x");
+        Serial.println(results.command, HEX);
+        Serial.println();
+        int _index = codelist.add(results.value, results.decode_type);
+        // Serial.println(codelist.codes[_index].toString());
+        irrecv.resume(); // Receive the next value
+        // irsend.send(codelist.codes[_index].decode_type, codelist.codes[_index].code)
+    }
+    if (Serial.available())
+    {
+        String s = "";
+        while (Serial.available() > 0)
+        {
+            char c = Serial.read();
+            if (c != 10 && c != 13)
+            {
+                s += c;
+            }
+        }
+        Serial.printf("<<%s\n", s.c_str());
+        // Read the data from Serial until newline character
+        // Check if the input string is a valid number
+        int numValue = s.toInt();
+        Serial.println(s);
+        irsend.sendNEC(0x800080, 24);
+   //     irsend.sendNEC(0x154a02e5, 25);
+        if (numValue != 0 || s.equals("0"))
+        {
+
+            Serial.println(codelist.toString(numValue));
+            if (codelist.codes[numValue].configured)
+            {
+            }
+        }
+        else if (s == "all")
+        {
+            Serial.print(codelist.toString());
+        }
+    }
+
+    // server.handleClient(); // Handle incoming client requests
+}
